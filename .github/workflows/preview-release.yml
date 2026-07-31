@@ -24,6 +24,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Validate version
         id: version
@@ -64,6 +66,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           test -f app/build/LocalLLM.app/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib
+          app/build/LocalLLM.app/Contents/MacOS/LocalLLM --smoke-test
           codesign --verify --deep --strict --verbose=2 app/build/LocalLLM.app
           codesign --display --verbose=4 app/build/LocalLLM.app 2>&1 | grep -q 'Signature=adhoc'
           hdiutil verify "app/build/dist/LocalLLM-${VERSION}-arm64.dmg"

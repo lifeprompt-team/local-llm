@@ -23,7 +23,7 @@ macOSのどこからでも `Shift` を素早く2回押して呼び出せる、Ap
 
 ## インストール
 
-現在は無料で配布できる[unsigned preview](https://github.com/lifeprompt-team/local-llm/releases/tag/v0.1.0-unsigned)を公開しています。DMGを開き、`LocalLLM.app`をApplicationsへ移動してください。このビルドはApple Developer ID署名・公証をしていないため、通常のダブルクリックでは初回起動がブロックされます。
+unsigned previewは[Releases](https://github.com/lifeprompt-team/local-llm/releases)の`-unsigned` prereleaseから入手できます。DMGを開き、`LocalLLM.app`をApplicationsへ移動してください。このビルドはApple Developer ID署名・公証をしていないため、通常のダブルクリックでは初回起動がブロックされます。
 
 一度LocalLLMを開こうとして警告を閉じた後、「システム設定 → プライバシーとセキュリティ」のセキュリティ欄でLocalLLMの「このまま開く」を選び、確認画面でも「開く」を選択してください。詳しい手順と注意事項は[UNSIGNED_PREVIEW.md](UNSIGNED_PREVIEW.md)にあります。
 
