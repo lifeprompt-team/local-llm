@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+server.log
+
+# Swift / app ビルド成果物
+app/.build/
+app/build/
+app/.swiftpm/
+
+# launchd ログ
+launchd/*.log
+
+# Hugging Face のモデルキャッシュ（実体は ~/.cache/huggingface に保存される）
+models/
+
+# Local signing/notarization material
+*.p12
+*.p8
+*.cer
+*.keychain
+*.keychain-db

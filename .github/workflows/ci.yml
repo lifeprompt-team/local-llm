@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Xcode Metal Toolchain
+        run: xcodebuild -downloadComponent metalToolchain
+
+      - name: Build app
+        env:
+          SIGN_IDENTITY: '-'
+        run: ./app/build.sh
+
+      - name: Verify app bundle
+        run: |
+          test -x app/build/LocalLLM.app/Contents/MacOS/LocalLLM
+          test -f app/build/LocalLLM.app/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib
+          codesign --verify --deep --strict --verbose=2 app/build/LocalLLM.app
+
+      - name: Archive app
+        run: ditto -c -k --sequesterRsrc --keepParent app/build/LocalLLM.app LocalLLM-ci-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalLLM-ci-arm64
+          path: LocalLLM-ci-arm64.zip
+          if-no-files-found: error
