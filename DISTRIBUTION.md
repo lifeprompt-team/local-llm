@@ -2,6 +2,12 @@
 
 LocalLLMは、GitHub ActionsでDeveloper ID署名、公証、ZIP/DMG作成、GitHub Release公開まで自動化できます。
 
+## 無料のunsigned preview
+
+Apple Developer Programへ加入しなくても、ad-hoc署名したZIP/DMGをGitHub prereleaseとして公開できます。GitHub Actionsの「Unsigned Preview Release」を手動実行し、`0.1.0`のようなバージョンを入力してください。
+
+このワークフローは`v0.1.0-unsigned`形式のタグとprereleaseを作成し、ZIP、DMG、`checksums.txt`を添付します。未公証アプリなので、利用者は[UNSIGNED_PREVIEW.md](UNSIGNED_PREVIEW.md)の手順でmacOSのセキュリティ設定から初回起動を許可する必要があります。一般ユーザー向けの正式版では、以下のDeveloper ID配布へ切り替えてください。
+
 ## 配布に必要なもの
 
 1. Apple Developer Programのメンバーシップ

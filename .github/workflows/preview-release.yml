@@ -1,0 +1,87 @@
+name: Unsigned Preview Release
+run-name: Unsigned preview v${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer without the v prefix
+        required: true
+        default: 0.1.0
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: unsigned-preview-release
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid SemVer: ${VERSION}" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}-unsigned"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release already exists: ${TAG}" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Lint source and scripts
+        run: |
+          bash -n app/build.sh app/package-release.sh serve.sh curl_example.sh
+          python3 -m py_compile chat.py stream.py
+          xcrun swift-format lint --configuration .swift-format --recursive app/Sources/LocalLLM
+
+      - name: Install Xcode Metal Toolchain
+        run: xcodebuild -downloadComponent metalToolchain
+
+      - name: Build ad-hoc signed app and packages
+        env:
+          SIGN_IDENTITY: '-'
+          BUILD_NUMBER: ${{ github.run_number }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ./app/package-release.sh "${VERSION}"
+
+      - name: Verify unsigned artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test -f app/build/LocalLLM.app/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib
+          app/build/LocalLLM.app/Contents/MacOS/LocalLLM --smoke-test
+          codesign --verify --deep --strict --verbose=2 app/build/LocalLLM.app
+          codesign --display --verbose=4 app/build/LocalLLM.app 2>&1 | grep -q 'Signature=adhoc'
+          hdiutil verify "app/build/dist/LocalLLM-${VERSION}-arm64.dmg"
+          cd app/build/dist
+          shasum -a 256 -c checksums.txt
+
+      - name: Publish unsigned prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "${TAG}" \
+            app/build/dist/LocalLLM-* \
+            app/build/dist/checksums.txt \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --title "LocalLLM ${TAG} preview" \
+            --notes-file UNSIGNED_PREVIEW.md
