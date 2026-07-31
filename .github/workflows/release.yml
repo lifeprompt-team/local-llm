@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   release:
+    if: github.event_name == 'workflow_dispatch' || !endsWith(github.ref_name, '-unsigned')
     runs-on: macos-26
     timeout-minutes: 90
 
