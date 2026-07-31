@@ -102,6 +102,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "${TAG}" app/build/dist/LocalLLM-* \
+          gh release create "${TAG}" app/build/dist/LocalLLM-* app/build/dist/checksums.txt \
             --title "LocalLLM ${TAG}" \
             --generate-notes

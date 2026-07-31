@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Lint source and scripts
+        run: |
+          bash -n app/build.sh app/package-release.sh serve.sh curl_example.sh
+          python3 -m py_compile chat.py stream.py
+          xcrun swift-format lint --configuration .swift-format --recursive app/Sources/LocalLLM
+
       - name: Install Xcode Metal Toolchain
         run: xcodebuild -downloadComponent metalToolchain
 

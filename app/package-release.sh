@@ -25,13 +25,26 @@ STAGING_DIR="build/dmg-staging"
 
 APP_VERSION="${VERSION}" BUILD_NUMBER="${BUILD_NUMBER}" ./build.sh
 
+submit_for_notarization() {
+    local target="$1"
+    if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+        xcrun notarytool submit "${target}" --keychain-profile "${NOTARY_PROFILE}" --wait
+    else
+        xcrun notarytool submit "${target}" \
+            --key "${NOTARY_KEY_PATH}" \
+            --key-id "${NOTARY_KEY_ID}" \
+            --issuer "${NOTARY_ISSUER_ID}" \
+            --wait
+    fi
+}
+
 NOTARIZED=0
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
     echo "==> Submit app for notarization (keychain profile)"
     mkdir -p "${DIST_DIR}"
     NOTARY_UPLOAD="${DIST_DIR}/notary-upload.zip"
     ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${NOTARY_UPLOAD}"
-    xcrun notarytool submit "${NOTARY_UPLOAD}" --keychain-profile "${NOTARY_PROFILE}" --wait
+    submit_for_notarization "${NOTARY_UPLOAD}"
     /bin/rm -f "${NOTARY_UPLOAD}"
     NOTARIZED=1
 elif [[ -n "${NOTARY_KEY_PATH:-}" && -n "${NOTARY_KEY_ID:-}" && -n "${NOTARY_ISSUER_ID:-}" ]]; then
@@ -39,11 +52,7 @@ elif [[ -n "${NOTARY_KEY_PATH:-}" && -n "${NOTARY_KEY_ID:-}" && -n "${NOTARY_ISS
     mkdir -p "${DIST_DIR}"
     NOTARY_UPLOAD="${DIST_DIR}/notary-upload.zip"
     ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${NOTARY_UPLOAD}"
-    xcrun notarytool submit "${NOTARY_UPLOAD}" \
-        --key "${NOTARY_KEY_PATH}" \
-        --key-id "${NOTARY_KEY_ID}" \
-        --issuer "${NOTARY_ISSUER_ID}" \
-        --wait
+    submit_for_notarization "${NOTARY_UPLOAD}"
     /bin/rm -f "${NOTARY_UPLOAD}"
     NOTARIZED=1
 elif [[ "${REQUIRE_NOTARIZATION:-0}" == "1" ]]; then
@@ -71,6 +80,8 @@ hdiutil create -quiet -volname "${APP_NAME}" -srcfolder "${STAGING_DIR}" -ov -fo
 /bin/rm -rf "${STAGING_DIR}"
 
 if [[ "${NOTARIZED}" == "1" ]]; then
+    echo "==> Submit DMG for notarization"
+    submit_for_notarization "${DMG_PATH}"
     xcrun stapler staple "${DMG_PATH}"
     xcrun stapler validate "${DMG_PATH}"
     spctl --assess --type execute --verbose=2 "${APP_PATH}"
