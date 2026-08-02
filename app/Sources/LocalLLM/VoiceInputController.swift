@@ -115,13 +115,13 @@ final class VoiceInputController: VoiceInputControlling {
             try await analyzer.start(inputSequence: analyzerStream)
             try Task.checkCancellation()
 
+            let tapHandler = makeAudioTapHandler(continuation: audioContinuation)
             inputNode.installTap(
                 onBus: 0,
                 bufferSize: 2_048,
-                format: naturalFormat
-            ) { buffer, _ in
-                audioContinuation.yield(SendableAudioBuffer(buffer))
-            }
+                format: naturalFormat,
+                block: tapHandler
+            )
             tapInstalled = true
             audioEngine.prepare()
             try audioEngine.start()
@@ -322,6 +322,17 @@ private struct SendableAudioBuffer: @unchecked Sendable {
 
     init(_ value: AVAudioPCMBuffer) {
         self.value = value
+    }
+}
+
+/// AVAudioEngineはリアルタイムキューからtapを呼ぶため、MainActorを継承しない
+/// @Sendableクロージャを非隔離コンテキストで生成する。
+@available(macOS 26.0, *)
+private func makeAudioTapHandler(
+    continuation: AsyncStream<SendableAudioBuffer>.Continuation
+) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+    { buffer, _ in
+        continuation.yield(SendableAudioBuffer(buffer))
     }
 }
 
