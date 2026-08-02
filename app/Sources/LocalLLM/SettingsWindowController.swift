@@ -13,6 +13,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
     private var promptView: NSTextView!
     private var statusLabel: NSTextField!
     private var saveButton: NSButton!
+    private var voiceCheckbox: NSButton!
 
     /// プログラム的なポップアップ選択中は true。モデル選択アクションの誤発火を防ぐ。
     private var isPopulatingModels = false
@@ -67,15 +68,31 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
         refresh.toolTip = "利用可能なMLXモデルを再確認"
         content.addSubview(refresh)
 
+        let voice = NSButton(
+            checkboxWithTitle: "⇧⇧で開いたらローカル音声入力を開始",
+            target: self,
+            action: #selector(voiceSettingChanged)
+        )
+        voice.frame = NSRect(x: 20, y: winHeight - 122, width: 420, height: 22)
+        voice.font = .systemFont(ofSize: 13)
+        if #available(macOS 26.0, *) {
+            voice.toolTip = "Apple SpeechAnalyzerでオンデバイス転写します"
+        } else {
+            voice.isEnabled = false
+            voice.toolTip = "音声入力にはmacOS 26以降が必要です"
+        }
+        content.addSubview(voice)
+        self.voiceCheckbox = voice
+
         // システムプロンプト
         let promptLabel = makeLabel(
             "システムプロンプト",
-            frame: NSRect(x: 20, y: winHeight - 124, width: 300, height: 20)
+            frame: NSRect(x: 20, y: winHeight - 158, width: 300, height: 20)
         )
         content.addSubview(promptLabel)
 
         let (scroll, textView) = TextViewFactory.make(
-            frame: NSRect(x: 20, y: 70, width: 520, height: winHeight - 200),
+            frame: NSRect(x: 20, y: 70, width: 520, height: winHeight - 234),
             editable: true,
             fontSize: 13,
             bordered: true
@@ -114,6 +131,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
 
     private func loadIntoUI() {
         promptView?.string = Settings.systemPrompt
+        voiceCheckbox?.state = Settings.voiceInputEnabled ? .on : .off
         statusLabel?.stringValue = ""
         // 一覧取得前でも現在値を選択肢として出しておく。
         isPopulatingModels = true
@@ -148,6 +166,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
             if !item.isEnabled {
                 item.toolTip = FoundationModelsClient.unavailableReason
             }
+        } else if modelID == Settings.grokModelID {
+            item.isEnabled = GrokClient.isAvailable
+            if !item.isEnabled {
+                item.toolTip = "Grok Build CLIのインストールとgrok loginが必要です"
+            }
         }
         return item
     }
@@ -158,6 +181,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
                 return "\(Settings.appleFoundationModelName)（利用不可: \(reason)）"
             }
             return Settings.appleFoundationModelName
+        }
+        if modelID == Settings.grokModelID {
+            return GrokClient.isAvailable
+                ? Settings.grokModelName
+                : "\(Settings.grokModelName)（CLIなし）"
         }
         return modelID == Settings.defaultModel ? "Agents-A1 4B（MLX 4bit・推奨）" : modelID
     }
@@ -193,10 +221,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
         let current = Settings.model
         popup.removeAllItems()
         var list = models
-        if current != Settings.appleFoundationModelID, !list.contains(current) {
+        if current != Settings.appleFoundationModelID, current != Settings.grokModelID,
+            !list.contains(current)
+        {
             list.insert(current, at: 0)
         }
         popup.menu?.addItem(makeModelItem(Settings.appleFoundationModelID))
+        popup.menu?.addItem(makeModelItem(Settings.grokModelID))
         popup.menu?.addItem(.separator())
         list.forEach { popup.menu?.addItem(makeModelItem($0)) }
         selectModel(current)
@@ -207,6 +238,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
 
     @objc private func refreshTapped() {
         refreshModels()
+    }
+
+    @objc private func voiceSettingChanged() {
+        Settings.voiceInputEnabled = voiceCheckbox?.state == .on
+        statusToken &+= 1
+        statusLabel?.stringValue = "音声入力設定を変更しました"
     }
 
     /// ポップアップの選択が変わった瞬間に呼ばれ、モデルを即時反映する。

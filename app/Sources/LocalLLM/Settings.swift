@@ -6,10 +6,13 @@ enum Settings {
     private static let defaults = UserDefaults.standard
     private static let modelKey = "selectedModel"
     private static let systemKey = "systemPrompt"
+    private static let voiceInputKey = "voiceInputEnabled"
 
     nonisolated static let defaultModel = "wcamon/Agents-A1-4B-MLX-4bit"
-    static let appleFoundationModelID = "apple-foundation"
-    static let appleFoundationModelName = "Apple Intelligence（オンデバイス）"
+    nonisolated static let appleFoundationModelID = "apple-foundation"
+    nonisolated static let appleFoundationModelName = "Apple Intelligence（オンデバイス）"
+    nonisolated static let grokModelID = "grok-build"
+    nonisolated static let grokModelName = "Grok 4.5（クラウド・Web/X検索）"
     static let defaultSystemPrompt = """
         あなたは開発者のアシスタントです。前置きや相づちは書かず、本題だけを返します。
 
@@ -32,7 +35,10 @@ enum Settings {
     static var model: String {
         get {
             guard let stored = defaults.string(forKey: modelKey) else { return defaultModel }
-            guard stored == defaultModel || stored == appleFoundationModelID else {
+            guard
+                stored == defaultModel || stored == appleFoundationModelID
+                    || stored == grokModelID
+            else {
                 // Ollama版など旧バックエンドの選択値はMLX版へ自動移行する。
                 defaults.set(defaultModel, forKey: modelKey)
                 return defaultModel
@@ -45,5 +51,14 @@ enum Settings {
     static var systemPrompt: String {
         get { defaults.string(forKey: systemKey) ?? defaultSystemPrompt }
         set { defaults.set(newValue, forKey: systemKey) }
+    }
+
+    /// ⇧⇧でパレットを開いたとき、対応OSではローカル音声入力を自動開始する。
+    static var voiceInputEnabled: Bool {
+        get {
+            guard defaults.object(forKey: voiceInputKey) != nil else { return true }
+            return defaults.bool(forKey: voiceInputKey)
+        }
+        set { defaults.set(newValue, forKey: voiceInputKey) }
     }
 }

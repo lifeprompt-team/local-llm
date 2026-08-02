@@ -1,18 +1,20 @@
 # LocalLLM
 
-macOSのどこからでも `Shift` を素早く2回押して呼び出せる、Apple Silicon向けのローカルAIパレットです。質問と回答はMacの中で処理され、普段使っているアプリやフルスクリーンの手前に小さな入力ウィンドウを表示します。
+macOSのどこからでも `Shift` を素早く2回押して呼び出せる、Apple Silicon向けのAIパレットです。MLX / Apple Intelligenceのオンデバイス推論と、Web・X検索を使えるGrok Buildを選択できます。
 
 既定モデルは [`wcamon/Agents-A1-4B-MLX-4bit`](https://huggingface.co/wcamon/Agents-A1-4B-MLX-4bit) です。
 
 ## 特長
 
 - `Shift` のダブルタップで、どのSpaceからでもすぐ質問
+- macOS 26以降ではパレットと同時にローカル音声入力を開始
 - AppKitベースのmacOSネイティブUIと半透明のグラデーション
 - [MLX Swift](https://github.com/ml-explore/mlx-swift-lm)をアプリ内で直接実行。PythonやローカルHTTPサーバーは不要
 - 回答をストリーミング表示し、同じウィンドウ内では会話を継続
 - 最後の利用から60秒後にモデルをメモリから解放
 - 質問履歴、システムプロンプト、モデル選択をローカル保存
 - 対応するMacではApple Foundation Modelsも選択可能
+- Grok BuildのサブスクリプションでGrok 4.5とWeb / X検索を選択可能
 
 ## 必要環境
 
@@ -20,6 +22,8 @@ macOSのどこからでも `Shift` を素早く2回押して呼び出せる、Ap
 - macOS 14 Sonoma以降
 - 初回モデル取得用のインターネット接続と約3GBの空き容量
 - グローバルショートカット用のアクセシビリティ権限
+- 自動音声入力にはmacOS 26以降とマイク権限
+- Grokを使う場合は[Grok Build CLI](https://docs.x.ai/build/cli/headless-scripting)と対応サブスクリプション
 
 ## インストール
 
@@ -33,9 +37,18 @@ Apple Developer Programへ加入した場合は、同じReleasesページで署�
 
 モデルは初回の質問時にHugging Faceから取得します。`mlx_lm`で同じモデルを取得済みの場合は既存のキャッシュを再利用します。
 
+Grokを使う場合は、先にターミナルでログインし、LocalLLMの設定から「Grok 4.5（クラウド・Web/X検索）」を選びます。
+
+```bash
+grok login
+```
+
+Grokは空の一時ディレクトリ内でヘッドレス実行されます。ローカルファイルの読み書き、シェル、MCPは拒否し、Grok側のホスト型Web / X検索だけを利用できるようにしています。
+
 ## 使い方
 
 - `Shift`を素早く2回: 入力パレットを表示
+- マイクボタン: ローカル音声入力の開始 / 停止（macOS 26以降）
 - `Enter`: 質問を送信
 - `Esc`またはパレット外をクリック: 閉じる
 - メニューバーのLocalLLMアイコン: 質問、履歴、設定、終了
@@ -81,7 +94,9 @@ uv run mlx_lm.chat --model wcamon/Agents-A1-4B-MLX-4bit
 
 ## プライバシー
 
-推論、プロンプト、回答履歴はローカルで処理されます。テレメトリはありません。初回モデル取得時のみHugging Faceへ接続します。選択したモデル自体には、それぞれの配布元のライセンスが適用されます。
+テレメトリはありません。音声認識はApple SpeechAnalyzerによりMac上で処理され、録音データは保存・送信しません。MLXまたはApple Intelligence選択中は、質問、推論、履歴がローカルで処理されます（初回モデル取得時のみHugging Faceへ接続）。
+
+Grok選択中は、Enterで確定した質問、会話履歴、システムプロンプトがxAIのGrok Buildへ送信されます。Web / X検索では検索先に関連クエリが送信される場合があります。履歴はこのMacにも保存されます。選択したモデルとCLIにはそれぞれの提供元の利用条件が適用されます。
 
 ## 配布と開発
 

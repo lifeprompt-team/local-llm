@@ -71,6 +71,10 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>音声で質問を入力するためにマイクを使用します。音声認識はMac上で処理されます。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>音声による質問入力をMac上で文字起こしするために使用します。</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>

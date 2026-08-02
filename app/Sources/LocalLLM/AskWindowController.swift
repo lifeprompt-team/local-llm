@@ -28,6 +28,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private var backgroundGradient: CAGradientLayer!
     private var accentBorder: AccentBorderView!
     private var aiIcon: AIIconView!
+    private var voiceButton: NSButton!
     private var input: NSTextField!
     private var outputSeparator: NSBox!
     private var reasoningHeader: NSButton!
@@ -42,6 +43,8 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private let reasoningPaneHeight: CGFloat = 110
     private var task: Task<Void, Never>?
     private var preloadTask: Task<Void, Never>?
+    private var voiceOperationTask: Task<Void, Never>?
+    private var voiceController: (any VoiceInputControlling)?
     /// 現在の生成だけがUIと履歴を更新できるようにする識別子。
     private var activeRequestID: UUID?
     /// 遅延した前面化処理が、閉じた後のパネルを再表示しないための世代番号。
@@ -106,7 +109,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         conversation = []
         input.isEnabled = true
         input.stringValue = ""
-        setInputPlaceholder("ローカルAIに聞く")
+        setInputPlaceholder(defaultPlaceholder())
         answerView.string = ""
         reasoningView.string = ""
         collapse()
@@ -114,6 +117,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         position(panel, height: compactHeight)
         bringToFront(panel)
         preloadSelectedModel()
+        startVoiceInputIfNeeded()
     }
 
     func hide() {
@@ -123,6 +127,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         task = nil
         preloadTask?.cancel()
         preloadTask = nil
+        cancelVoiceInput()
         hideLoading()
         palette.hide()
         panel?.orderOut(nil)
@@ -156,7 +161,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         preloadTask = nil
 
         let model = Settings.model
-        guard model != Settings.appleFoundationModelID else {
+        guard model != Settings.appleFoundationModelID, model != Settings.grokModelID else {
             return
         }
 
@@ -185,7 +190,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
             blue: 0.76,
             alpha: 1
         )
-        field.placeholderAttributedString = makeInputPlaceholder("ローカルAIに聞く")
+        field.placeholderAttributedString = makeInputPlaceholder(defaultPlaceholder())
         field.controlSize = .large
         field.isBordered = false
         field.drawsBackground = false
@@ -257,6 +262,23 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         )
         holder.addSubview(field)
         self.input = field
+
+        let mic = NSButton(
+            image: NSImage(systemSymbolName: "mic", accessibilityDescription: "音声入力")
+                ?? NSImage(),
+            target: self,
+            action: #selector(toggleVoiceInput)
+        )
+        mic.isBordered = false
+        mic.imageScaling = .scaleProportionallyDown
+        mic.contentTintColor = .secondaryLabelColor
+        mic.toolTip = "ローカル音声入力"
+        if #unavailable(macOS 26.0) {
+            mic.isEnabled = false
+            mic.toolTip = "音声入力にはmacOS 26以降が必要です"
+        }
+        holder.addSubview(mic)
+        self.voiceButton = mic
 
         // compact時は隠し、回答を展開した時だけ標準セパレータで領域を区切る。
         let separator = NSBox(frame: .zero)
@@ -380,8 +402,14 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
             width: accessorySize,
             height: accessorySize
         )
+        voiceButton.frame = NSRect(
+            x: width - inputHorizontalMargin - accessorySize,
+            y: accessoryY,
+            width: accessorySize,
+            height: accessorySize
+        )
         let inputX = inputHorizontalMargin + accessorySize + accessoryGap
-        let inputMaxX = width - inputHorizontalMargin
+        let inputMaxX = voiceButton.frame.minX - accessoryGap
         input.frame = NSRect(
             x: inputX,
             y: inputY,
@@ -474,6 +502,129 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         input.placeholderAttributedString = makeInputPlaceholder(text)
     }
 
+    private func defaultPlaceholder() -> String {
+        switch Settings.model {
+        case Settings.appleFoundationModelID:
+            return "Apple Intelligenceに聞く"
+        case Settings.grokModelID:
+            return "Grokに聞く（クラウド）"
+        default:
+            return "ローカルAIに聞く"
+        }
+    }
+
+    // MARK: - Voice input
+
+    private func startVoiceInputIfNeeded() {
+        guard Settings.voiceInputEnabled else { return }
+        startVoiceInput()
+    }
+
+    @objc private func toggleVoiceInput() {
+        if voiceController?.isRecording == true {
+            finishVoiceInput(submitAfter: false)
+        } else {
+            startVoiceInput()
+        }
+    }
+
+    private func startVoiceInput() {
+        guard task == nil, voiceOperationTask == nil else { return }
+        guard #available(macOS 26.0, *) else { return }
+
+        let controller = VoiceInputController()
+        controller.onTranscript = { [weak self, weak controller] text in
+            guard let self, let controller, self.voiceController === controller else { return }
+            guard self.panel?.isVisible == true else { return }
+            self.input.stringValue = text
+            self.updatePalette()
+        }
+        voiceController = controller
+        setInputPlaceholder("音声認識を準備中…")
+        updateVoiceButton(recording: false, enabled: false)
+
+        voiceOperationTask = Task { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            do {
+                try await controller.start()
+                try Task.checkCancellation()
+                guard self.voiceController === controller, self.panel?.isVisible == true else {
+                    controller.cancel()
+                    return
+                }
+                self.voiceOperationTask = nil
+                self.updateVoiceButton(recording: true, enabled: true)
+                self.setInputPlaceholder("聞いています…（Enterで送信）")
+            } catch is CancellationError {
+                controller.cancel()
+            } catch {
+                guard self.voiceController === controller else { return }
+                self.voiceOperationTask = nil
+                self.voiceController = nil
+                self.updateVoiceButton(recording: false, enabled: true)
+                self.setInputPlaceholder("音声入力を開始できません")
+                self.voiceButton.toolTip = error.localizedDescription
+                NSLog("[LocalLLM] voice input failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func finishVoiceInput(submitAfter: Bool) {
+        guard let controller = voiceController, controller.isRecording else {
+            if voiceOperationTask != nil { cancelVoiceInput() }
+            if submitAfter { submit() }
+            return
+        }
+
+        voiceOperationTask?.cancel()
+        updateVoiceButton(recording: false, enabled: false)
+        if submitAfter { input.isEnabled = false }
+
+        voiceOperationTask = Task { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            do {
+                let transcript = try await controller.stop()
+                guard self.voiceController === controller else { return }
+                if !transcript.isEmpty { self.input.stringValue = transcript }
+            } catch {
+                guard self.voiceController === controller else { return }
+                self.voiceButton.toolTip = error.localizedDescription
+                NSLog("[LocalLLM] voice finalization failed: \(error.localizedDescription)")
+            }
+
+            guard self.voiceController === controller else { return }
+            self.voiceController = nil
+            self.voiceOperationTask = nil
+            self.input.isEnabled = true
+            self.updateVoiceButton(recording: false, enabled: true)
+            self.setInputPlaceholder(self.defaultPlaceholder())
+            if submitAfter { self.submit() }
+        }
+    }
+
+    private func cancelVoiceInput() {
+        voiceOperationTask?.cancel()
+        voiceOperationTask = nil
+        voiceController?.cancel()
+        voiceController = nil
+        if voiceButton != nil {
+            updateVoiceButton(recording: false, enabled: task == nil)
+        }
+    }
+
+    private func updateVoiceButton(recording: Bool, enabled: Bool) {
+        guard voiceButton != nil else { return }
+        let symbol = recording ? "mic.fill" : "mic"
+        voiceButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "音声入力")
+        voiceButton.contentTintColor = recording ? .systemRed : .secondaryLabelColor
+        if #available(macOS 26.0, *) {
+            voiceButton.isEnabled = enabled
+        } else {
+            voiceButton.isEnabled = false
+        }
+        voiceButton.toolTip = recording ? "音声入力を停止" : "ローカル音声入力"
+    }
+
     private func position(_ panel: NSPanel, height: CGFloat) {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         // メニューバー下の可視領域の左上に、上・左 20px の余白で固定。展開は下方向に伸びる。
@@ -509,6 +660,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         let requestMessages = conversation + [.user(prompt)]
         input.stringValue = ""
         input.isEnabled = false
+        updateVoiceButton(recording: false, enabled: false)
         palette.hide()
 
         receivedFirstContent = false
@@ -525,10 +677,15 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         let selectedModel = Settings.model
         let selectedSystemPrompt = Settings.systemPrompt
         let pendingPreload = preloadTask
-        let historyModelName =
-            selectedModel == Settings.appleFoundationModelID
-            ? Settings.appleFoundationModelName
-            : selectedModel
+        let historyModelName: String
+        switch selectedModel {
+        case Settings.appleFoundationModelID:
+            historyModelName = Settings.appleFoundationModelName
+        case Settings.grokModelID:
+            historyModelName = Settings.grokModelName
+        default:
+            historyModelName = selectedModel
+        }
         let requestID = UUID()
         activeRequestID = requestID
 
@@ -547,6 +704,12 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
 
                 if selectedModel == Settings.appleFoundationModelID {
                     try await FoundationModelsClient.stream(
+                        messages: requestMessages,
+                        systemPrompt: selectedSystemPrompt,
+                        onEvent: onEvent
+                    )
+                } else if selectedModel == Settings.grokModelID {
+                    try await GrokClient.stream(
                         messages: requestMessages,
                         systemPrompt: selectedSystemPrompt,
                         onEvent: onEvent
@@ -573,6 +736,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                     HistoryStore.shared.add(prompt: prompt, response: answer, model: historyModelName)
                 }
                 self.input.isEnabled = true
+                self.updateVoiceButton(recording: false, enabled: true)
                 self.setInputPlaceholder("続けて聞く")
                 self.panel?.makeFirstResponder(self.input)
             } catch {
@@ -584,11 +748,13 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                     self.task = nil
                     self.activeRequestID = nil
                     self.input.isEnabled = true
+                    self.updateVoiceButton(recording: false, enabled: true)
                     return
                 }
 
                 let message: String
                 if selectedModel != Settings.appleFoundationModelID,
+                    selectedModel != Settings.grokModelID,
                     (error as NSError).domain == NSURLErrorDomain
                 {
                     message = "MLXモデルをロードできませんでした。\nネットワーク接続と空き容量を確認して、もう一度お試しください。"
@@ -601,6 +767,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                 self.answerView.string = message
                 self.answerView.scrollToEndOfDocument(nil)
                 self.input.isEnabled = true
+                self.updateVoiceButton(recording: false, enabled: true)
                 self.input.stringValue = prompt
                 self.panel?.makeFirstResponder(self.input)
             }
@@ -735,7 +902,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         }
 
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            submit()
+            finishVoiceInput(submitAfter: true)
             return true
         }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
@@ -752,12 +919,12 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     // また、Space 切り替え（三本指スワイプ）や Mission Control に伴う resignKey では
     // 閉じない。パネルは全 Space に追従するので、置いていかれず出続ける。
     func windowDidResignKey(_ notification: Notification) {
-        guard task == nil else { return }
+        guard task == nil, voiceOperationTask == nil else { return }
 
         // resignKey と Space 変更通知は前後し得るため、少し遅らせて判定する。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self = self else { return }
-            guard self.task == nil else { return }
+            guard self.task == nil, self.voiceOperationTask == nil else { return }
             guard let panel = self.panel, panel.isVisible else { return }
             // Space 切り替え直後の resignKey なら閉じない。
             if Date().timeIntervalSince(self.lastSpaceChangeAt) < 0.5 { return }
