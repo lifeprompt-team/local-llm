@@ -89,20 +89,24 @@ SIGN_IDENTITY="${SIGN_IDENTITY:-LocalLLM Dev}"
 STRICT_SIGNING_CHECK=1
 if [[ "${SIGN_IDENTITY}" == "-" ]]; then
     echo "==> Code sign (ad-hoc)"
-    codesign --force --deep --options runtime --timestamp=none --sign - "${APP_DIR}"
+    codesign --force --deep --options runtime --timestamp=none \
+        --entitlements LocalLLM.entitlements --sign - "${APP_DIR}"
 elif security find-identity -p codesigning 2>/dev/null | grep -Fq "${SIGN_IDENTITY}"; then
     if [[ "${SIGN_IDENTITY}" == Developer\ ID\ Application:* ]]; then
         echo "==> Code sign (Developer ID)"
-        codesign --force --deep --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+        codesign --force --deep --options runtime --timestamp \
+            --entitlements LocalLLM.entitlements --sign "${SIGN_IDENTITY}" "${APP_DIR}"
     else
         echo "==> Code sign (local identity: ${SIGN_IDENTITY})"
-        codesign --force --deep --options runtime --timestamp=none --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+        codesign --force --deep --options runtime --timestamp=none \
+            --entitlements LocalLLM.entitlements --sign "${SIGN_IDENTITY}" "${APP_DIR}"
         # 開発用の自己署名証明書は意図的にAppleの信頼チェーン外。
         STRICT_SIGNING_CHECK=0
     fi
 else
     echo "==> Code sign (ad-hoc; '${SIGN_IDENTITY}' was not found)"
-    codesign --force --deep --options runtime --timestamp=none --sign - "${APP_DIR}"
+    codesign --force --deep --options runtime --timestamp=none \
+        --entitlements LocalLLM.entitlements --sign - "${APP_DIR}"
 fi
 
 if [[ "${STRICT_SIGNING_CHECK}" == "1" ]]; then
