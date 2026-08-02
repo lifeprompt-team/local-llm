@@ -84,10 +84,16 @@ actor MLXModelManager {
     /// mlx_lm (Python) で取得済みのHugging Faceキャッシュがあれば再利用する。
     /// 既存ユーザーがSwift版へ移行したときに、同じ数GBのモデルを再取得しないため。
     private func modelConfiguration(for model: String) -> ModelConfiguration {
+        let toolCallFormat: ToolCallFormat? =
+            model == Settings.defaultModel ? .xmlFunction : nil
+
         if let overridePath = ProcessInfo.processInfo.environment["LOCALLLM_MODEL_PATH"],
             isModelDirectory(URL(fileURLWithPath: overridePath))
         {
-            return ModelConfiguration(directory: URL(fileURLWithPath: overridePath))
+            return ModelConfiguration(
+                directory: URL(fileURLWithPath: overridePath),
+                toolCallFormat: toolCallFormat
+            )
         }
 
         let cacheName = "models--" + model.replacingOccurrences(of: "/", with: "--")
@@ -106,11 +112,11 @@ actor MLXModelManager {
                 .appendingPathComponent(revision, isDirectory: true)
             if isModelDirectory(snapshot) {
                 NSLog("[LocalLLM] reusing existing Hugging Face model cache")
-                return ModelConfiguration(directory: snapshot)
+                return ModelConfiguration(directory: snapshot, toolCallFormat: toolCallFormat)
             }
         }
 
-        return ModelConfiguration(id: model)
+        return ModelConfiguration(id: model, toolCallFormat: toolCallFormat)
     }
 
     private func isModelDirectory(_ directory: URL) -> Bool {

@@ -8,7 +8,7 @@ final class AskPanel: NSPanel {
 
 /// ⇧⇧ で出るフローティング入力窓。入力 → Enter で送信し、回答をストリーミング表示する。
 @MainActor
-final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
+final class AskWindowController: NSObject, NSTextFieldDelegate, NSTextViewDelegate, NSWindowDelegate {
     private let width: CGFloat = 440
     private let pad: CGFloat = 16
     private let inputVerticalMargin: CGFloat = 10.5
@@ -51,6 +51,8 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private var lastSpaceChangeAt: Date = .distantPast
     private var receivedFirstContent = false
     private var receivedFirstReasoning = false
+    /// モデル経由のツール結果と、その後に生成される回答の間へ改行を1度だけ入れる。
+    private var pendingToolAnswerSeparator = false
     /// 思考セクションが開いているか（ヘッダクリックで開閉）。
     private var reasoningExpanded = false
     /// 出力領域（回答・思考）を表示中か（compact では false）。
@@ -68,6 +70,19 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         self?.execute(command)
     }
     private lazy var commands: [SlashCommand] = [
+        SlashCommand(name: "/find", subtitle: "ファイル名を完全一致・部分一致・ファジー検索") {
+            [weak self] in
+            self?.prefillCommand("/find ")
+        },
+        SlashCommand(name: "/grep", subtitle: "ファイル内容を安全な文字列検索") { [weak self] in
+            self?.prefillCommand("/grep ")
+        },
+        SlashCommand(name: "/sys", subtitle: "メモリ・ディスク・macOS情報を確認") { [weak self] in
+            self?.runCommand("/sys")
+        },
+        SlashCommand(name: "/tools", subtitle: "読み取り専用ツールの使い方") { [weak self] in
+            self?.runCommand("/tools")
+        },
         SlashCommand(name: "/settings", subtitle: "設定（モデル・プロンプト）を開く") { [weak self] in
             self?.onOpenSettings?()
         },
@@ -101,6 +116,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         palette.hide()
         receivedFirstContent = false
         receivedFirstReasoning = false
+        pendingToolAnswerSeparator = false
         reasoningExpanded = false
         contentBuffer = ""
         conversation = []
@@ -303,6 +319,14 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
             bordered: false
         )
         aView.isRichText = true
+        aView.delegate = self
+        (aView as? ActionTextView)?.onLinkClick = { [weak self] link in
+            self?.handleToolActionLink(link) ?? false
+        }
+        aView.linkTextAttributes = [
+            .foregroundColor: NSColor.systemBlue,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
         aScroll.autoresizingMask = []
         aScroll.isHidden = true
         holder.addSubview(aScroll)
@@ -506,6 +530,16 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         let prompt = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
 
+        do {
+            if let command = try ReadOnlyToolCommandParser.parse(prompt) {
+                submitTool(prompt: prompt, command: command)
+                return
+            }
+        } catch {
+            presentToolError(error)
+            return
+        }
+
         let requestMessages = conversation + [.user(prompt)]
         input.stringValue = ""
         input.isEnabled = false
@@ -513,6 +547,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
 
         receivedFirstContent = false
         receivedFirstReasoning = false
+        pendingToolAnswerSeparator = false
         reasoningExpanded = false
         contentBuffer = ""
         answerView.string = ""
@@ -607,6 +642,212 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         }
     }
 
+    private func submitTool(prompt: String, command: ReadOnlyToolCommand) {
+        let requestMessages = conversation + [.user(prompt)]
+        input.stringValue = ""
+        input.isEnabled = false
+        palette.hide()
+
+        receivedFirstContent = false
+        receivedFirstReasoning = false
+        pendingToolAnswerSeparator = false
+        reasoningExpanded = false
+        contentBuffer = ""
+        answerView.string = ""
+        reasoningView.string = ""
+        updateReasoningChevron()
+        expand()
+        showLoading("読み取り中…")
+        task?.cancel()
+
+        let requestID = UUID()
+        activeRequestID = requestID
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let output = try await ReadOnlyToolExecutor.shared.execute(command)
+                try Task.checkCancellation()
+                guard self.activeRequestID == requestID else { return }
+
+                let plainText = self.renderToolOutput(output)
+                self.contentBuffer = plainText
+                self.conversation = requestMessages + [.assistant(plainText)]
+                HistoryStore.shared.add(
+                    prompt: prompt,
+                    response: plainText,
+                    model: "read-only-tools"
+                )
+                self.hideLoading()
+                self.task = nil
+                self.activeRequestID = nil
+                self.input.isEnabled = true
+                self.setInputPlaceholder("続けて聞く")
+                self.panel?.makeFirstResponder(self.input)
+            } catch {
+                guard self.activeRequestID == requestID else { return }
+                if Self.isCancellation(error) {
+                    self.hideLoading()
+                    self.task = nil
+                    self.activeRequestID = nil
+                    self.input.isEnabled = true
+                    return
+                }
+                self.hideLoading()
+                self.task = nil
+                self.activeRequestID = nil
+                self.input.isEnabled = true
+                self.renderToolError(error)
+                self.input.stringValue = prompt
+                self.panel?.makeFirstResponder(self.input)
+            }
+        }
+    }
+
+    private func presentToolError(_ error: Error) {
+        palette.hide()
+        receivedFirstContent = true
+        receivedFirstReasoning = false
+        reasoningExpanded = false
+        contentBuffer = "エラー: \(error.localizedDescription)"
+        reasoningView.string = ""
+        answerView.string = contentBuffer
+        expand()
+        hideLoading()
+        refreshOutputViews()
+        answerView.scrollToBeginningOfDocument(nil)
+    }
+
+    private func renderToolError(_ error: Error) {
+        receivedFirstContent = true
+        receivedFirstReasoning = false
+        reasoningExpanded = false
+        contentBuffer = "エラー: \(error.localizedDescription)"
+        reasoningView.string = ""
+        answerView.string = contentBuffer
+        refreshOutputViews()
+        relayout()
+        answerView.scrollToBeginningOfDocument(nil)
+    }
+
+    @discardableResult
+    private func renderToolOutput(_ output: ReadOnlyToolOutput, appending: Bool = false) -> String {
+        receivedFirstContent = true
+        receivedFirstReasoning = false
+        reasoningExpanded = false
+        refreshOutputViews()
+        relayout()
+
+        let rendered =
+            appending
+            ? NSMutableAttributedString(attributedString: answerView.attributedString())
+            : NSMutableAttributedString()
+        if appending, rendered.length > 0 {
+            rendered.append(NSAttributedString(string: "\n\n", attributes: contentAttributes))
+        }
+        rendered.append(
+            NSAttributedString(
+                string: "\(output.title)\n",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
+                    .foregroundColor: NSColor.labelColor,
+                ]
+            ))
+        rendered.append(
+            NSAttributedString(
+                string: "\(output.summary)\n",
+                attributes: contentAttributes
+            ))
+        if !output.details.isEmpty {
+            rendered.append(
+                NSAttributedString(
+                    string: "\(output.details.joined(separator: "\n"))\n",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 12),
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                    ]
+                ))
+        }
+
+        if output.items.isEmpty, let emptyMessage = output.emptyMessage {
+            rendered.append(
+                NSAttributedString(
+                    string: "\n\(emptyMessage)",
+                    attributes: contentAttributes
+                ))
+        } else {
+            for (index, item) in output.items.enumerated() {
+                rendered.append(
+                    NSAttributedString(
+                        string: "\n\(index + 1). \(item.url.lastPathComponent)\n",
+                        attributes: [
+                            .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
+                            .foregroundColor: NSColor.labelColor,
+                        ]
+                    ))
+                rendered.append(
+                    NSAttributedString(
+                        string: "\(item.url.path)\n\(item.detail)\n",
+                        attributes: [
+                            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                            .foregroundColor: NSColor.secondaryLabelColor,
+                        ]
+                    ))
+                appendToolAction(
+                    "パスをコピー",
+                    action: "copy",
+                    path: item.url.path,
+                    to: rendered
+                )
+                rendered.append(NSAttributedString(string: "   "))
+                appendToolAction(
+                    "Finderで表示",
+                    action: "reveal",
+                    path: item.url.path,
+                    to: rendered
+                )
+                rendered.append(NSAttributedString(string: "\n"))
+            }
+        }
+
+        answerView.textStorage?.setAttributedString(rendered)
+        answerView.scrollToBeginningOfDocument(nil)
+        return plainText(for: output)
+    }
+
+    private func appendToolAction(
+        _ title: String,
+        action: String,
+        path: String,
+        to output: NSMutableAttributedString
+    ) {
+        guard let url = toolActionURL(action: action, path: path) else { return }
+        output.append(
+            NSAttributedString(
+                string: title,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                    .link: url,
+                ]
+            ))
+    }
+
+    private func toolActionURL(action: String, path: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "localllm-action"
+        components.host = action
+        components.queryItems = [URLQueryItem(name: "path", value: path)]
+        return components.url
+    }
+
+    private func plainText(for output: ReadOnlyToolOutput) -> String {
+        var lines = [output.title, output.summary]
+        lines.append(contentsOf: output.details)
+        for item in output.items {
+            lines.append("\(item.url.path) — \(item.detail)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         let nsError = error as NSError
@@ -626,6 +867,13 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                 relayout()
             }
             append(to: reasoningView, text, attributes: reasoningAttributes)
+        case .tool(let output):
+            hideLoading()
+            let hasEarlierOutput = !contentBuffer.isEmpty
+            let plainText = renderToolOutput(output, appending: hasEarlierOutput)
+            if hasEarlierOutput { contentBuffer += "\n\n" }
+            contentBuffer += plainText
+            pendingToolAnswerSeparator = true
         case .content(let text):
             if !receivedFirstContent {
                 receivedFirstContent = true
@@ -637,6 +885,11 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                 }
                 refreshOutputViews()
                 relayout()
+            }
+            if pendingToolAnswerSeparator {
+                contentBuffer += "\n\n"
+                append(to: answerView, "\n\n", attributes: contentAttributes)
+                pendingToolAnswerSeparator = false
             }
             contentBuffer += text
             append(to: answerView, text, attributes: contentAttributes)
@@ -709,6 +962,85 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         palette.hide()
         input.stringValue = ""
         command.action()
+    }
+
+    private func prefillCommand(_ command: String) {
+        input.stringValue = command
+        input.isEnabled = true
+        panel?.makeFirstResponder(input)
+        if let editor = input.currentEditor() {
+            editor.selectedRange = NSRange(location: input.stringValue.utf16.count, length: 0)
+        }
+    }
+
+    private func runCommand(_ command: String) {
+        input.stringValue = command
+        submit()
+    }
+
+    // MARK: - NSTextViewDelegate
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        handleToolActionLink(link)
+    }
+
+    private func handleToolActionLink(_ link: Any) -> Bool {
+        let url: URL?
+        if let link = link as? URL {
+            url = link
+        } else if let link = link as? String {
+            url = URL(string: link)
+        } else {
+            url = nil
+        }
+        guard let url, url.scheme == "localllm-action",
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let path = components.queryItems?.first(where: { $0.name == "path" })?.value
+        else {
+            return false
+        }
+
+        switch url.host {
+        case "copy":
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(path, forType: .string)
+            flashInputPlaceholder("パスをコピーしました")
+            return true
+        case "reveal":
+            let fileURL = URL(fileURLWithPath: path).standardizedFileURL
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                flashInputPlaceholder("ファイルが見つかりません")
+                NSSound.beep()
+                return true
+            }
+
+            // `activateFileViewerSelecting`はnonactivatingPanelから呼ぶとFinderが
+            // 前面化しないことがある。戻り値を持つselectFileで選択・前面化まで要求する。
+            let didReveal = NSWorkspace.shared.selectFile(
+                fileURL.path,
+                inFileViewerRootedAtPath: ""
+            )
+            if !didReveal {
+                let fallback = fileURL.hasDirectoryPath
+                    ? fileURL
+                    : fileURL.deletingLastPathComponent()
+                NSWorkspace.shared.open(fallback)
+            }
+            NSLog("[LocalLLM] Finder reveal \(didReveal ? "succeeded" : "used fallback"): \(fileURL.path)")
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func flashInputPlaceholder(_ message: String) {
+        setInputPlaceholder(message)
+        let generation = presentationGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.presentationGeneration == generation else { return }
+            self.setInputPlaceholder("続けて聞く")
+        }
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

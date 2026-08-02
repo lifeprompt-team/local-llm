@@ -10,6 +10,8 @@ macOSのどこからでも `Shift` を素早く2回押して呼び出せる、Ap
 - AppKitベースのmacOSネイティブUIと半透明のグラデーション
 - [MLX Swift](https://github.com/ml-explore/mlx-swift-lm)をアプリ内で直接実行。PythonやローカルHTTPサーバーは不要
 - 回答をストリーミング表示し、同じウィンドウ内では会話を継続
+- Spotlightに依存しないファイル名・ファイル内容の読み取り専用検索
+- Macのメモリ、ディスク、OS情報をファイル変更なしで確認
 - 最後の利用から60秒後にモデルをメモリから解放
 - 質問履歴、システムプロンプト、モデル選択をローカル保存
 - 対応するMacではApple Foundation Modelsも選択可能
@@ -42,9 +44,22 @@ Apple Developer Programへ加入した場合は、同じReleasesページで署�
 
 入力欄の先頭で `/` を打つとコマンド候補が表示されます。
 
+既定のAgents-A1モデルでは、「印影を含むファイルを探して」「このMacの空き容量を
+教えて」のような自然文からも、モデルが必要な読み取り専用ツールを選んで実行します。
+明示的に検索方法や検索先を固定したい場合は、次のコマンドを使えます。
+
 - `/settings`: 設定を開く
 - `/history`: 履歴を開く
+- `/find [exact|contains|prefix|fuzzy] 検索語 [フォルダ]`: ファイル名を検索
+- `/grep 検索文字列 [フォルダ]`: UTF-8テキストファイルの内容を検索
+- `/sys`: Macのメモリ、ディスク、OS情報を確認
+- `/tools`: 読み取り専用ツールの使い方を表示
 - `/quit`: LocalLLMを終了
+
+検索結果からパスのコピーとFinder表示ができます。検索ツールには削除、移動、名前変更、
+ファイル書き込み、任意のシェル実行機能はありません。フォルダを省略した場合はホーム
+フォルダを検索し、隠しファイル、パッケージ内部、シンボリックリンク、代表的なキャッシュ
+フォルダを既定で除外します。
 
 履歴は `~/Library/Application Support/LocalLLM/history.json` に最大500件保存されます。
 
@@ -66,6 +81,7 @@ cd local-llm/app
 ```bash
 cd app/build/DerivedData/Build/Products/Release
 ./LocalLLM --smoke-test
+./LocalLLM --tool-call-smoke-test /path/to/search/root
 ```
 
 ## CLIツール（任意）
