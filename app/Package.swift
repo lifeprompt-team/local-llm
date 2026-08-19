@@ -34,6 +34,11 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/LocalLLM"
-        )
+        ),
+        .testTarget(
+            name: "LocalLLMTests",
+            dependencies: ["LocalLLM"],
+            path: "Tests/LocalLLMTests"
+        ),
     ]
 )

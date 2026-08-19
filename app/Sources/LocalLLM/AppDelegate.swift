@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hotKey.onDoubleTap = { [weak self] in
             self?.askController.toggle()
         }
+        hotKey.onDoubleTapHold = { [weak self] in
+            self?.askController.activateVoiceInput()
+        }
         hotKey.start()
     }
 

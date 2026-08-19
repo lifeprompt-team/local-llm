@@ -20,6 +20,8 @@ final class VoiceInputController: VoiceInputControlling {
     var onTranscript: ((String) -> Void)?
     private(set) var isRecording = false
 
+    private let vocabulary: [String]
+    private let replacementRules: [VoiceReplacementRule]
     private let audioEngine = AVAudioEngine()
     private var analyzer: SpeechAnalyzer?
     private var resultsTask: Task<Void, Never>?
@@ -32,6 +34,14 @@ final class VoiceInputController: VoiceInputControlling {
     private var volatileText = ""
     private var resultsError: Error?
 
+    init(
+        vocabulary: [String] = Settings.voiceVocabulary,
+        replacementRules: [VoiceReplacementRule] = Settings.voiceReplacementRules
+    ) {
+        self.vocabulary = Array(vocabulary.prefix(100))
+        self.replacementRules = replacementRules
+    }
+
     func start() async throws {
         guard !isRecording else { return }
         try await requestMicrophoneAccess()
@@ -41,7 +51,16 @@ final class VoiceInputController: VoiceInputControlling {
             throw VoiceInputError.unsupportedLocale
         }
 
-        let transcriber = DictationTranscriber(locale: locale, preset: .progressiveShortDictation)
+        // progressiveShortDictationの即時表示は残しつつ、途中結果を細かく確定して
+        // 後続の文脈による修正を妨げる frequentFinalization だけを外す。
+        let preset = DictationTranscriber.Preset.progressiveShortDictation
+        let transcriber = DictationTranscriber(
+            locale: locale,
+            contentHints: preset.contentHints,
+            transcriptionOptions: preset.transcriptionOptions,
+            reportingOptions: preset.reportingOptions.subtracting([.frequentFinalization]),
+            attributeOptions: preset.attributeOptions
+        )
         let modules: [any SpeechModule] = [transcriber]
 
         if let installation = try await AssetInventory.assetInstallationRequest(supporting: modules) {
@@ -71,6 +90,11 @@ final class VoiceInputController: VoiceInputControlling {
         resultsError = nil
 
         let analyzer = SpeechAnalyzer(modules: modules)
+        if !vocabulary.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings = [.general: vocabulary]
+            try await analyzer.setContext(context)
+        }
         try await analyzer.prepareToAnalyze(in: analysisFormat)
         let (audioStream, audioContinuation) = AsyncStream<SendableAudioBuffer>.makeStream(
             bufferingPolicy: .bufferingNewest(8)
@@ -142,7 +166,7 @@ final class VoiceInputController: VoiceInputControlling {
     }
 
     func stop() async throws -> String {
-        guard let analyzer else { return combinedText }
+        guard let analyzer else { return processedText }
 
         cleanupAudioInput()
         audioContinuation?.finish()
@@ -173,7 +197,7 @@ final class VoiceInputController: VoiceInputControlling {
             throw resultsError
         }
         if let conversionError { throw conversionError }
-        return combinedText
+        return processedText
     }
 
     func cancel() {
@@ -205,11 +229,15 @@ final class VoiceInputController: VoiceInputControlling {
         } else {
             volatileText = text
         }
-        onTranscript?(combinedText)
+        onTranscript?(processedText)
     }
 
     private var combinedText: String {
         appendSegment(volatileText, to: finalizedText)
+    }
+
+    private var processedText: String {
+        VoiceTextProcessing.apply(replacementRules, to: combinedText)
     }
 
     private func appendSegment(_ segment: String, to base: String) -> String {

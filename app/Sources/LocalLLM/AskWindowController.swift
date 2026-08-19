@@ -6,9 +6,30 @@ final class AskPanel: NSPanel {
     override var canBecomeMain: Bool { true }
 }
 
+/// プレースホルダーを描画できる、透明な複数行入力ビュー。
+final class PromptTextView: NSTextView {
+    var placeholderAttributedString: NSAttributedString? {
+        didSet { needsDisplay = true }
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, let placeholderAttributedString else { return }
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        placeholderAttributedString.draw(
+            at: NSPoint(x: textContainerInset.width + padding, y: textContainerInset.height)
+        )
+    }
+}
+
 /// ⇧⇧ で出るフローティング入力窓。入力 → Enter で送信し、回答をストリーミング表示する。
 @MainActor
-final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
+final class AskWindowController: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private let width: CGFloat = 440
     private let pad: CGFloat = 16
     private let inputVerticalMargin: CGFloat = 10.5
@@ -16,7 +37,9 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private let accessorySize: CGFloat = 18
     private let accessoryGap: CGFloat = 10
     private let outputHeight: CGFloat = 300
-    private var inputHeight: CGFloat = 0
+    private let minimumInputHeight: CGFloat = 22
+    private let maximumInputLines: CGFloat = 7
+    private var inputHeight: CGFloat = 22
 
     private var compactHeight: CGFloat { inputHeight + inputVerticalMargin * 2 }
     private var expandedHeight: CGFloat {
@@ -29,7 +52,8 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private var accentBorder: AccentBorderView!
     private var aiIcon: AIIconView!
     private var voiceButton: NSButton!
-    private var input: NSTextField!
+    private var inputScroll: NSScrollView!
+    private var input: PromptTextView!
     private var outputSeparator: NSBox!
     private var reasoningHeader: NSButton!
     private var reasoningScroll: NSScrollView!
@@ -38,7 +62,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private var answerView: NSTextView!
     private var spinner: NSProgressIndicator!
     private var statusLabel: NSTextField!
-    private var cornerRadius: CGFloat { compactHeight / 2 }
+    private var cornerRadius: CGFloat { min(22, compactHeight / 2) }
     private let headerHeight: CGFloat = 22
     private let reasoningPaneHeight: CGFloat = 110
     private var task: Task<Void, Never>?
@@ -62,6 +86,8 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     private var contentBuffer = ""
     /// パネルを開いている間だけ保持する会話履歴。閉じて開き直すと新規会話になる。
     private var conversation: [ChatMessage] = []
+    /// 生成中にEnterで確定された質問。現在の回答が完了したらFIFOで順次実行する。
+    private var queuedPrompts: [String] = []
 
     /// スラッシュコマンド起動時に親（AppDelegate）が画面を開くためのコールバック。
     var onOpenSettings: (() -> Void)?
@@ -84,13 +110,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
 
     func toggle() {
         if let panel = panel, panel.isVisible {
-            // 前面化に失敗して背後に残ったパネルは、もう一度の ⇧⇧ で回収する。
-            // key のときだけ通常のトグルとして閉じる。
-            if panel.isKeyWindow {
-                hide()
-            } else {
-                bringToFront(panel)
-            }
+            hide()
         } else {
             show()
         }
@@ -107,8 +127,9 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         reasoningExpanded = false
         contentBuffer = ""
         conversation = []
-        input.isEnabled = true
-        input.stringValue = ""
+        queuedPrompts = []
+        setInputEnabled(true)
+        setInputText("")
         setInputPlaceholder(defaultPlaceholder())
         answerView.string = ""
         reasoningView.string = ""
@@ -117,12 +138,24 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         position(panel, height: compactHeight)
         bringToFront(panel)
         preloadSelectedModel()
-        startVoiceInputIfNeeded()
+    }
+
+    /// ⇧⇧の2回目を長押ししたとき、窓を表示して音声入力を開始する。
+    func activateVoiceInput() {
+        if panel?.isVisible != true {
+            show()
+        } else if let panel {
+            bringToFront(panel)
+        }
+
+        guard Settings.voiceInputEnabled, voiceController == nil else { return }
+        startVoiceInput()
     }
 
     func hide() {
         presentationGeneration &+= 1
         activeRequestID = nil
+        queuedPrompts.removeAll()
         task?.cancel()
         task = nil
         preloadTask?.cancel()
@@ -181,8 +214,11 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     // MARK: - UI construction
 
     private func build() {
-        // 入力欄の自然な高さを先に確定し、パネル高をその実寸＋上下マージンから決める。
-        let field = NSTextField(frame: .zero)
+        inputHeight = minimumInputHeight
+        let inputWidth = width - inputHorizontalMargin * 2 - accessorySize * 2 - accessoryGap * 2
+        let field = PromptTextView(
+            frame: NSRect(x: 0, y: 0, width: inputWidth, height: inputHeight)
+        )
         field.font = .systemFont(ofSize: 15, weight: .regular)
         field.textColor = NSColor(
             srgbRed: 0.90,
@@ -191,17 +227,33 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
             alpha: 1
         )
         field.placeholderAttributedString = makeInputPlaceholder(defaultPlaceholder())
-        field.controlSize = .large
-        field.isBordered = false
         field.drawsBackground = false
-        field.focusRingType = .none
         field.isEditable = true
         field.isSelectable = true
-        field.usesSingleLineMode = true
-        field.lineBreakMode = .byTruncatingTail
+        field.isRichText = false
+        field.importsGraphics = false
+        field.allowsUndo = true
+        field.isHorizontallyResizable = false
+        field.isVerticallyResizable = true
+        field.textContainerInset = .zero
+        field.textContainer?.lineFragmentPadding = 0
+        field.textContainer?.lineBreakMode = .byWordWrapping
+        field.textContainer?.widthTracksTextView = true
+        field.textContainer?.containerSize = NSSize(
+            width: inputWidth,
+            height: .greatestFiniteMagnitude
+        )
         field.delegate = self
-        field.autoresizingMask = []
-        inputHeight = ceil(field.intrinsicContentSize.height)
+        field.autoresizingMask = [.width]
+
+        let fieldScroll = NSScrollView(frame: .zero)
+        fieldScroll.borderType = .noBorder
+        fieldScroll.drawsBackground = false
+        fieldScroll.hasHorizontalScroller = false
+        fieldScroll.hasVerticalScroller = false
+        fieldScroll.autohidesScrollers = true
+        fieldScroll.documentView = field
+        fieldScroll.autoresizingMask = []
 
         let panel = AskPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: compactHeight),
@@ -254,13 +306,14 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         holder.addSubview(icon)
         self.aiIcon = icon
 
-        field.frame = NSRect(
+        fieldScroll.frame = NSRect(
             x: inputHorizontalMargin + accessorySize + accessoryGap,
             y: compactHeight - inputVerticalMargin - inputHeight,
-            width: width - inputHorizontalMargin * 2 - accessorySize - accessoryGap,
+            width: inputWidth,
             height: inputHeight
         )
-        holder.addSubview(field)
+        holder.addSubview(fieldScroll)
+        self.inputScroll = fieldScroll
         self.input = field
 
         let mic = NSButton(
@@ -410,12 +463,13 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         )
         let inputX = inputHorizontalMargin + accessorySize + accessoryGap
         let inputMaxX = voiceButton.frame.minX - accessoryGap
-        input.frame = NSRect(
+        inputScroll.frame = NSRect(
             x: inputX,
             y: inputY,
             width: inputMaxX - inputX,
             height: inputHeight
         )
+        layoutInputDocument()
 
         let regionBottom = pad
         let regionTop = height - inputVerticalMargin - inputHeight - pad  // 入力の下端 - pad
@@ -502,6 +556,71 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         input.placeholderAttributedString = makeInputPlaceholder(text)
     }
 
+    private var maximumInputHeight: CGFloat {
+        guard let font = input.font, let layoutManager = input.layoutManager else {
+            return minimumInputHeight * maximumInputLines
+        }
+        return max(
+            minimumInputHeight,
+            ceil(layoutManager.defaultLineHeight(for: font) * maximumInputLines)
+        )
+    }
+
+    /// 折り返しを含む本文の実寸を計測し、入力欄を最大行数まで伸縮する。
+    private func updateInputHeight() {
+        guard input != nil, inputScroll != nil else { return }
+        let contentHeight = measuredInputContentHeight()
+        let nextHeight = min(maximumInputHeight, max(minimumInputHeight, contentHeight))
+
+        guard abs(nextHeight - inputHeight) >= 0.5 else {
+            layoutInputDocument()
+            return
+        }
+
+        inputHeight = nextHeight
+        if let panel, panel.isVisible {
+            position(panel, height: outputShown ? expandedHeight : compactHeight)
+        } else {
+            layoutInputDocument()
+        }
+    }
+
+    private func measuredInputContentHeight() -> CGFloat {
+        guard let layoutManager = input.layoutManager, let textContainer = input.textContainer else {
+            return minimumInputHeight
+        }
+        let contentWidth = max(1, inputScroll.contentSize.width)
+        textContainer.containerSize = NSSize(width: contentWidth, height: .greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: textContainer)
+        let usedHeight = layoutManager.usedRect(for: textContainer).height
+        return ceil(usedHeight + input.textContainerInset.height * 2)
+    }
+
+    /// 上限を超えた文章ではdocumentViewだけを伸ばし、キャレット位置まで内部スクロールする。
+    private func layoutInputDocument() {
+        guard input != nil, inputScroll != nil else { return }
+        let contentWidth = max(1, inputScroll.contentSize.width)
+        input.textContainer?.containerSize = NSSize(
+            width: contentWidth,
+            height: .greatestFiniteMagnitude
+        )
+        let documentHeight = max(inputHeight, measuredInputContentHeight())
+        input.frame = NSRect(x: 0, y: 0, width: contentWidth, height: documentHeight)
+        input.scrollRangeToVisible(input.selectedRange())
+    }
+
+    private func setInputText(_ text: String) {
+        input.string = text
+        input.needsDisplay = true
+        updateInputHeight()
+    }
+
+    private func setInputEnabled(_ enabled: Bool) {
+        input.isEditable = enabled
+        input.isSelectable = true
+        input.alphaValue = enabled ? 1 : 0.7
+    }
+
     private func defaultPlaceholder() -> String {
         switch Settings.model {
         case Settings.appleFoundationModelID:
@@ -515,11 +634,6 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
 
     // MARK: - Voice input
 
-    private func startVoiceInputIfNeeded() {
-        guard Settings.voiceInputEnabled else { return }
-        startVoiceInput()
-    }
-
     @objc private func toggleVoiceInput() {
         if voiceController?.isRecording == true {
             finishVoiceInput(submitAfter: false)
@@ -529,14 +643,14 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     }
 
     private func startVoiceInput() {
-        guard task == nil, voiceOperationTask == nil else { return }
+        guard voiceController == nil, voiceOperationTask == nil else { return }
         guard #available(macOS 26.0, *) else { return }
 
         let controller = VoiceInputController()
         controller.onTranscript = { [weak self, weak controller] text in
             guard let self, let controller, self.voiceController === controller else { return }
             guard self.panel?.isVisible == true else { return }
-            self.input.stringValue = text
+            self.setInputText(text)
             self.updatePalette()
         }
         voiceController = controller
@@ -578,14 +692,14 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
 
         voiceOperationTask?.cancel()
         updateVoiceButton(recording: false, enabled: false)
-        if submitAfter { input.isEnabled = false }
+        if submitAfter { setInputEnabled(false) }
 
         voiceOperationTask = Task { [weak self, weak controller] in
             guard let self, let controller else { return }
             do {
                 let transcript = try await controller.stop()
                 guard self.voiceController === controller else { return }
-                if !transcript.isEmpty { self.input.stringValue = transcript }
+                if !transcript.isEmpty { self.setInputText(transcript) }
             } catch {
                 guard self.voiceController === controller else { return }
                 self.voiceButton.toolTip = error.localizedDescription
@@ -595,7 +709,7 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
             guard self.voiceController === controller else { return }
             self.voiceController = nil
             self.voiceOperationTask = nil
-            self.input.isEnabled = true
+            self.setInputEnabled(true)
             self.updateVoiceButton(recording: false, enabled: true)
             self.setInputPlaceholder(self.defaultPlaceholder())
             if submitAfter { self.submit() }
@@ -608,7 +722,15 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         voiceController?.cancel()
         voiceController = nil
         if voiceButton != nil {
-            updateVoiceButton(recording: false, enabled: task == nil)
+            updateVoiceButton(recording: false, enabled: true)
+        }
+    }
+
+    private func refreshVoiceButton() {
+        if voiceController?.isRecording == true {
+            updateVoiceButton(recording: true, enabled: true)
+        } else {
+            updateVoiceButton(recording: false, enabled: voiceOperationTask == nil)
         }
     }
 
@@ -654,14 +776,32 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
     // MARK: - Submit / streaming
 
     private func submit() {
-        let prompt = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
 
-        let requestMessages = conversation + [.user(prompt)]
-        input.stringValue = ""
-        input.isEnabled = false
-        updateVoiceButton(recording: false, enabled: false)
+        setInputText("")
         palette.hide()
+        if task != nil {
+            queuedPrompts.append(prompt)
+            updateInputPlaceholderForGeneration()
+            panel?.makeFirstResponder(input)
+            return
+        }
+
+        startRequest(prompt)
+    }
+
+    private func startRequest(_ prompt: String) {
+        guard task == nil else {
+            queuedPrompts.append(prompt)
+            updateInputPlaceholderForGeneration()
+            return
+        }
+
+        let requestMessages = conversation + [.user(prompt)]
+        setInputEnabled(true)
+        refreshVoiceButton()
+        updateInputPlaceholderForGeneration()
 
         receivedFirstContent = false
         receivedFirstReasoning = false
@@ -672,7 +812,6 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         updateReasoningChevron()
         expand()
         showLoading("生成中…")
-        task?.cancel()
 
         let selectedModel = Settings.model
         let selectedSystemPrompt = Settings.systemPrompt
@@ -735,8 +874,9 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                     self.conversation = requestMessages + [.assistant(answer)]
                     HistoryStore.shared.add(prompt: prompt, response: answer, model: historyModelName)
                 }
-                self.input.isEnabled = true
-                self.updateVoiceButton(recording: false, enabled: true)
+                if self.startNextQueuedRequestIfNeeded() { return }
+
+                self.refreshVoiceButton()
                 self.setInputPlaceholder("続けて聞く")
                 self.panel?.makeFirstResponder(self.input)
             } catch {
@@ -747,8 +887,8 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                     self.hideLoading()
                     self.task = nil
                     self.activeRequestID = nil
-                    self.input.isEnabled = true
-                    self.updateVoiceButton(recording: false, enabled: true)
+                    if self.startNextQueuedRequestIfNeeded() { return }
+                    self.refreshVoiceButton()
                     return
                 }
 
@@ -766,11 +906,30 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
                 self.activeRequestID = nil
                 self.answerView.string = message
                 self.answerView.scrollToEndOfDocument(nil)
-                self.input.isEnabled = true
-                self.updateVoiceButton(recording: false, enabled: true)
-                self.input.stringValue = prompt
+                if self.startNextQueuedRequestIfNeeded() { return }
+
+                self.refreshVoiceButton()
+                if self.input.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.setInputText(prompt)
+                }
                 self.panel?.makeFirstResponder(self.input)
             }
+        }
+    }
+
+    @discardableResult
+    private func startNextQueuedRequestIfNeeded() -> Bool {
+        guard task == nil, !queuedPrompts.isEmpty else { return false }
+        let nextPrompt = queuedPrompts.removeFirst()
+        startRequest(nextPrompt)
+        return true
+    }
+
+    private func updateInputPlaceholderForGeneration() {
+        if queuedPrompts.isEmpty {
+            setInputPlaceholder("生成中も次の質問を入力")
+        } else {
+            setInputPlaceholder("次の質問を入力（待ち \(queuedPrompts.count)件）")
         }
     }
 
@@ -839,15 +998,16 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         textView.scrollToEndOfDocument(nil)
     }
 
-    // MARK: - NSTextFieldDelegate
+    // MARK: - NSTextViewDelegate
 
-    func controlTextDidChange(_ obj: Notification) {
+    func textDidChange(_ notification: Notification) {
+        updateInputHeight()
         updatePalette()
     }
 
     private func updatePalette() {
         guard let panel = panel else { return }
-        let text = input.stringValue
+        let text = input.string
         guard text.hasPrefix("/") else {
             palette.hide()
             return
@@ -860,9 +1020,9 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         }
         let anchorInWindow = NSRect(
             x: pad,
-            y: input.frame.minY,
+            y: inputScroll.frame.minY,
             width: width - pad * 2,
-            height: input.frame.height
+            height: inputScroll.frame.height
         )
         palette.update(items: matches, anchorBelow: panel.convertToScreen(anchorInWindow), parent: panel)
     }
@@ -874,11 +1034,11 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
 
     private func execute(_ command: SlashCommand) {
         palette.hide()
-        input.stringValue = ""
+        setInputText("")
         command.action()
     }
 
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         // 候補表示中は矢印キー / Enter / Esc をパレット操作に割り当てる。
         if palette.isVisible {
             switch commandSelector {
@@ -902,6 +1062,10 @@ final class AskWindowController: NSObject, NSTextFieldDelegate, NSWindowDelegate
         }
 
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                textView.insertText("\n", replacementRange: textView.selectedRange())
+                return true
+            }
             finishVoiceInput(submitAfter: true)
             return true
         }

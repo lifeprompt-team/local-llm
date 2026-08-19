@@ -1,12 +1,12 @@
 import AppKit
 
-/// 管理画面。MLXモデルの選択と、システムプロンプト編集を行う。
-/// モデルは選択した瞬間に即反映し、システムプロンプトは「保存」で永続化する。
+/// 管理画面。モデル、システムプロンプト、音声入力の辞書・置換を編集する。
+/// モデルは選択した瞬間に即反映し、テキスト設定は「保存」で永続化する。
 /// 変更は UserDefaults に保存され、再起動後も保持される。
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDelegate {
-    private let winWidth: CGFloat = 560
-    private let winHeight: CGFloat = 460
+    private let winWidth: CGFloat = 600
+    private let winHeight: CGFloat = 560
 
     private var window: NSWindow?
     private var modelPopup: NSPopUpButton!
@@ -14,6 +14,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
     private var statusLabel: NSTextField!
     private var saveButton: NSButton!
     private var voiceCheckbox: NSButton!
+    private var vocabularyView: NSTextView!
+    private var replacementsView: NSTextView!
 
     /// プログラム的なポップアップ選択中は true。モデル選択アクションの誤発火を防ぐ。
     private var isPopulatingModels = false
@@ -47,15 +49,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
         window.delegate = self
 
         let content = window.contentView!
+        let tabs = NSTabView(frame: NSRect(x: 16, y: 60, width: winWidth - 32, height: winHeight - 76))
+        tabs.autoresizingMask = [.width, .height]
+        content.addSubview(tabs)
+
+        let generalTab = NSTabViewItem(identifier: "general")
+        generalTab.label = "一般"
+        let general = NSView(frame: NSRect(x: 0, y: 0, width: winWidth - 48, height: winHeight - 112))
+        generalTab.view = general
+        tabs.addTabViewItem(generalTab)
 
         // モデル選択
-        let modelLabel = makeLabel("モデル", frame: NSRect(x: 20, y: winHeight - 52, width: 120, height: 20))
-        content.addSubview(modelLabel)
+        let modelLabel = makeLabel("モデル", frame: NSRect(x: 16, y: 414, width: 120, height: 20))
+        general.addSubview(modelLabel)
 
-        let popup = NSPopUpButton(frame: NSRect(x: 20, y: winHeight - 84, width: 388, height: 26), pullsDown: false)
+        let popup = NSPopUpButton(frame: NSRect(x: 16, y: 380, width: 372, height: 26), pullsDown: false)
         popup.target = self
         popup.action = #selector(modelSelectionChanged)
-        content.addSubview(popup)
+        general.addSubview(popup)
         self.modelPopup = popup
 
         let refresh = NSButton(
@@ -63,17 +74,42 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
             target: self,
             action: #selector(refreshTapped)
         )
-        refresh.frame = NSRect(x: 418, y: winHeight - 85, width: 122, height: 28)
+        refresh.frame = NSRect(x: 398, y: 379, width: 132, height: 28)
         refresh.bezelStyle = .rounded
         refresh.toolTip = "利用可能なMLXモデルを再確認"
-        content.addSubview(refresh)
+        general.addSubview(refresh)
+
+        // システムプロンプト
+        let promptLabel = makeLabel(
+            "システムプロンプト",
+            frame: NSRect(x: 16, y: 344, width: 300, height: 20)
+        )
+        general.addSubview(promptLabel)
+
+        let (promptScroll, textView) = TextViewFactory.make(
+            frame: NSRect(x: 16, y: 16, width: 514, height: 316),
+            editable: true,
+            fontSize: 13,
+            bordered: true
+        )
+        textView.isRichText = false
+        textView.delegate = self
+        promptScroll.autoresizingMask = [.width, .height]
+        general.addSubview(promptScroll)
+        self.promptView = textView
+
+        let voiceTab = NSTabViewItem(identifier: "voice")
+        voiceTab.label = "音声入力"
+        let voiceContent = NSView(frame: general.frame)
+        voiceTab.view = voiceContent
+        tabs.addTabViewItem(voiceTab)
 
         let voice = NSButton(
-            checkboxWithTitle: "⇧⇧で開いたらローカル音声入力を開始",
+            checkboxWithTitle: "⇧⇧の2回目を1秒長押しでローカル音声入力を開始",
             target: self,
             action: #selector(voiceSettingChanged)
         )
-        voice.frame = NSRect(x: 20, y: winHeight - 122, width: 420, height: 22)
+        voice.frame = NSRect(x: 16, y: 414, width: 430, height: 22)
         voice.font = .systemFont(ofSize: 13)
         if #available(macOS 26.0, *) {
             voice.toolTip = "Apple SpeechAnalyzerでオンデバイス転写します"
@@ -81,30 +117,55 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
             voice.isEnabled = false
             voice.toolTip = "音声入力にはmacOS 26以降が必要です"
         }
-        content.addSubview(voice)
+        voiceContent.addSubview(voice)
         self.voiceCheckbox = voice
 
-        // システムプロンプト
-        let promptLabel = makeLabel(
-            "システムプロンプト",
-            frame: NSRect(x: 20, y: winHeight - 158, width: 300, height: 20)
+        let voiceNote = makeNote(
+            "通常の⇧⇧はウィンドウの表示・非表示を切り替えます。音声はApple SpeechAnalyzerでMac上だけで処理します。",
+            frame: NSRect(x: 16, y: 374, width: 514, height: 34)
         )
-        content.addSubview(promptLabel)
+        voiceContent.addSubview(voiceNote)
 
-        let (scroll, textView) = TextViewFactory.make(
-            frame: NSRect(x: 20, y: 70, width: 520, height: winHeight - 234),
+        let vocabularyLabel = makeLabel(
+            "認識辞書（1行に1語・短いフレーズ、最大100件）",
+            frame: NSRect(x: 16, y: 344, width: 514, height: 20)
+        )
+        voiceContent.addSubview(vocabularyLabel)
+        let (vocabularyScroll, vocabularyView) = TextViewFactory.make(
+            frame: NSRect(x: 16, y: 224, width: 514, height: 112),
             editable: true,
             fontSize: 13,
             bordered: true
         )
-        textView.isRichText = false
-        textView.delegate = self
-        scroll.autoresizingMask = [.width, .height]
-        content.addSubview(scroll)
-        self.promptView = textView
+        vocabularyView.isRichText = false
+        vocabularyView.delegate = self
+        vocabularyScroll.toolTip = "例: Grok、MLX、Kanary"
+        voiceContent.addSubview(vocabularyScroll)
+        self.vocabularyView = vocabularyView
+
+        let replacementsLabel = makeLabel(
+            "置換ルール（1行に 認識結果 => 正しい表記）",
+            frame: NSRect(x: 16, y: 190, width: 514, height: 20)
+        )
+        voiceContent.addSubview(replacementsLabel)
+        let replacementNote = makeNote(
+            "上から順に文字列置換します。右辺を空にすると不要語を削除できます。例: グロック => Grok",
+            frame: NSRect(x: 16, y: 160, width: 514, height: 28)
+        )
+        voiceContent.addSubview(replacementNote)
+        let (replacementsScroll, replacementsView) = TextViewFactory.make(
+            frame: NSRect(x: 16, y: 16, width: 514, height: 136),
+            editable: true,
+            fontSize: 13,
+            bordered: true
+        )
+        replacementsView.isRichText = false
+        replacementsView.delegate = self
+        voiceContent.addSubview(replacementsScroll)
+        self.replacementsView = replacementsView
 
         // ステータス（保存通知など）
-        let status = makeLabel("", frame: NSRect(x: 20, y: 24, width: 360, height: 20))
+        let status = makeLabel("", frame: NSRect(x: 20, y: 24, width: 410, height: 20))
         status.textColor = .secondaryLabelColor
         content.addSubview(status)
         self.statusLabel = status
@@ -127,11 +188,21 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
         return label
     }
 
+    private func makeNote(_ text: String, frame: NSRect) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.frame = frame
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
     // MARK: - Data
 
     private func loadIntoUI() {
         promptView?.string = Settings.systemPrompt
         voiceCheckbox?.state = Settings.voiceInputEnabled ? .on : .off
+        vocabularyView?.string = Settings.voiceVocabularyText
+        replacementsView?.string = Settings.voiceReplacementsText
         statusLabel?.stringValue = ""
         // 一覧取得前でも現在値を選択肢として出しておく。
         isPopulatingModels = true
@@ -144,6 +215,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
     /// システムプロンプトの未保存差分を判定し、保存ボタンとステータス表示を更新する。
     private func updateDirtyState() {
         let hasUnsaved = (promptView?.string ?? "") != Settings.systemPrompt
+            || (vocabularyView?.string ?? "") != Settings.voiceVocabularyText
+            || (replacementsView?.string ?? "") != Settings.voiceReplacementsText
         saveButton?.isEnabled = hasUnsaved
         if hasUnsaved {
             statusToken &+= 1
@@ -260,7 +333,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
 
     @objc private func saveTapped() {
         Settings.systemPrompt = promptView?.string ?? Settings.defaultSystemPrompt
-        statusLabel?.stringValue = "保存しました"
+        Settings.voiceVocabularyText = vocabularyView?.string ?? ""
+        Settings.voiceReplacementsText = replacementsView?.string ?? ""
+        let vocabularyCount = Settings.voiceVocabulary.count
+        let replacementCount = Settings.voiceReplacementRules.count
+        statusLabel?.stringValue = "保存しました（辞書 \(vocabularyCount)件・置換 \(replacementCount)件）"
         updateDirtyState()
         statusToken &+= 1
         let token = statusToken
@@ -274,6 +351,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTextViewDele
 
     func textDidChange(_ notification: Notification) {
         let hasUnsaved = (promptView?.string ?? "") != Settings.systemPrompt
+            || (vocabularyView?.string ?? "") != Settings.voiceVocabularyText
+            || (replacementsView?.string ?? "") != Settings.voiceReplacementsText
         if !hasUnsaved {
             statusLabel?.stringValue = ""
         }

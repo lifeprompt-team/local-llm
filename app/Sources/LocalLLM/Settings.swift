@@ -7,6 +7,8 @@ enum Settings {
     private static let modelKey = "selectedModel"
     private static let systemKey = "systemPrompt"
     private static let voiceInputKey = "voiceInputEnabled"
+    private static let voiceVocabularyKey = "voiceVocabulary"
+    private static let voiceReplacementsKey = "voiceReplacements"
 
     nonisolated static let defaultModel = "wcamon/Agents-A1-4B-MLX-4bit"
     nonisolated static let appleFoundationModelID = "apple-foundation"
@@ -53,12 +55,32 @@ enum Settings {
         set { defaults.set(newValue, forKey: systemKey) }
     }
 
-    /// ⇧⇧でパレットを開いたとき、対応OSではローカル音声入力を自動開始する。
+    /// ⇧⇧の2回目を長押ししたとき、対応OSではローカル音声入力を開始する。
     static var voiceInputEnabled: Bool {
         get {
             guard defaults.object(forKey: voiceInputKey) != nil else { return true }
             return defaults.bool(forKey: voiceInputKey)
         }
         set { defaults.set(newValue, forKey: voiceInputKey) }
+    }
+
+    /// SpeechAnalyzerへ渡す認識ヒント。編集しやすいよう1行1語のテキストで保存する。
+    static var voiceVocabularyText: String {
+        get { defaults.string(forKey: voiceVocabularyKey) ?? "" }
+        set { defaults.set(newValue, forKey: voiceVocabularyKey) }
+    }
+
+    /// 音声認識結果へ適用するリテラル置換ルール。
+    static var voiceReplacementsText: String {
+        get { defaults.string(forKey: voiceReplacementsKey) ?? "" }
+        set { defaults.set(newValue, forKey: voiceReplacementsKey) }
+    }
+
+    static var voiceVocabulary: [String] {
+        VoiceTextProcessing.vocabulary(from: voiceVocabularyText)
+    }
+
+    static var voiceReplacementRules: [VoiceReplacementRule] {
+        VoiceTextProcessing.replacementRules(from: voiceReplacementsText)
     }
 }
